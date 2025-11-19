@@ -6,7 +6,7 @@ vectorizes growth above that threshold into polygons, and writes results to
 a GeoPackage layer.
 
 Example usage:
-    python compute-high-growth-clusters.py
+    python compute-change-clusters.py
         --ensemble-dir my_ensemble
         --start-ts 2020q2
         --end-ts 2025q2
