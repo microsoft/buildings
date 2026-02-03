@@ -112,15 +112,6 @@ python scripts/analysis/compute-change-clusters.py
     --output-gpkg growth.gpkg
     --output-layer clusters
     --min-cluster-pixels 8
-
-
-python scripts/analysis/compute-change-clusters.py
-    --start-cog /home/tammyglazer/ssd-datadrive/ssdprivate/tammyglazer/buildings/data/2020q2_cog.tif
-    --end-cog /home/tammyglazer/ssd-datadrive/ssdprivate/tammyglazer/buildings/data/2025q2_cog.tif
-    --change-percentile 0.95
-    --output-gpkg growth.gpkg
-    --output-layer clusters
-    --min-cluster-pixels 8
 ```
 <p align="center">
     <img src="images/bamako_growth.png" alt="Bamako growth" width="800"/><br/>
