@@ -1,0 +1,12 @@
+numpy
+pandas
+scipy
+matplotlib
+seaborn
+plotly
+folium
+imageio
+rasterio
+Pillow
+ipython
+notebook

@@ -1,0 +1,49 @@
+segmentation_model_name: "unet"
+backbone_name: "efficientnet-b6"
+weight_init: "imagenet"
+
+optimizer: "adamw"
+lr: 1.40e-03
+beta1: 8.88e-01
+beta2: 9.75e-01
+weight_decay: 0.01
+
+scheduler: cosine
+patience: 200
+
+patch_size: 512
+batch_size: 64
+num_workers: 6
+batches_per_epoch: 128
+
+gpu_ids: [0]
+seed: 0
+max_epochs: 1200
+log_dir: "<PATH_TO_LOGS_DIR>"
+output_dir: "<PATH_TO_OUTPUT_DIR>"
+
+experiment_short_name: "baseline"
+
+index: <PATH_TO_TRAIN_CSV>
+
+precision: "16-mixed"
+activation: "hard_sigmoid"
+in_channels: 4
+
+band_normalizers: [[0,1],[0,255],[0,255],[0,255]]
+
+erase_blocks_in_priors: True
+priors_bands: [0]
+erase_priors_p: .5
+erase_priors_scale: [.2, 1.]
+erase_priors_ratio: [.3, 3.3]
+
+target_bands: [0,1]
+target_normalizers: [1.0, 100]
+val_ratio: 0.2
+
+unet_heads: 2
+base_weight: 2.0
+
+losses: ["ignored_nan_huber", "ignored_nan_huber"]
+weight_temperature: 1
