@@ -110,9 +110,15 @@ def get_container_client(cfg: Config) -> ContainerClient:
     Uses SAS token if provided.
     """
     if not cfg.account_url or not cfg.container_name:
-        raise ValueError("account-url and container-name are required for blob listing")
+        raise ValueError(
+            "account-url and container-name are required for blob listing"
+        )
     credential = cfg.sas_token if cfg.sas_token else None
-    return ContainerClient(cfg.account_url, cfg.container_name, credential=credential)
+    return ContainerClient(
+        cfg.account_url,
+        cfg.container_name,
+        credential=credential
+    )
 
 
 def blob_to_url(cfg: Config, blob_name: str) -> str:
@@ -144,8 +150,8 @@ def transform_bbox_to_crs(
 def compute_tile_ids_from_index(cfg: Config) -> List[str]:
     """Intersect AOI bbox with quad index polygons and return tile IDs.
 
-    Note: this implementation requires bbox in EPSG:4326, assumes index has a
-    "quad" column, and strips .tif extension from quad field values if provided.
+    Note: requires bbox in EPSG:4326, assumes index has a "quad" column, and
+    strips .tif extension from quad field values if provided.
     """
     if cfg.bbox is None:
         raise ValueError("bbox must be provided")
@@ -186,7 +192,8 @@ def compute_tile_ids_from_index(cfg: Config) -> List[str]:
 def bbox_intersects_same_crs(
     raster_bounds, bbox_in_raster_crs: Tuple[float, float, float, float]
 ) -> bool:
-    """Return True if raster bounds intersect AOI bbox when both are in the same CRS."""
+    """Return True if raster bounds intersect AOI bbox when both are in
+    the same CRS."""
     rb_minx, rb_miny, rb_maxx, rb_maxy = (
         raster_bounds.left,
         raster_bounds.bottom,
@@ -194,14 +201,18 @@ def bbox_intersects_same_crs(
         raster_bounds.top,
     )
     minx, miny, maxx, maxy = bbox_in_raster_crs
-    return not (rb_maxx < minx or rb_minx > maxx or rb_maxy < miny or rb_miny > maxy)
+    return not (
+        rb_maxx < minx or rb_minx > maxx or rb_maxy < miny or rb_miny > maxy
+    )
 
 
 def list_tiles_for_timestamp(cfg: Config, timestamp: str) -> Dict[str, str]:
     """Return mapping tile_id -> URL for timestamp; apply AOI if provided."""
     logger.info(f"Listing tiles for timestamp '{timestamp}'")
     if not cfg.predictions_root or not cfg.data_dir:
-        raise ValueError("predictions-root and data-dir are required for blob listing")
+        raise ValueError(
+            "predictions-root and data-dir are required for blob listing"
+        )
 
     tiles = dict()
     if cfg.tile_ids_override:
@@ -241,7 +252,9 @@ def list_tiles_for_timestamp(cfg: Config, timestamp: str) -> Dict[str, str]:
             if ref_crs is None:
                 ref_crs = src.crs
                 bbox_in_ref_crs = transform_bbox_to_crs(cfg.bbox, ref_crs)
-                logger.debug(f"Initialized reference CRS for bbox transform: {ref_crs}")
+                logger.debug(
+                    f"Initialized reference CRS for bbox transform: {ref_crs}"
+                )
             bbox_to_use = (
                 bbox_in_ref_crs
                 if src.crs == ref_crs and bbox_in_ref_crs is not None
@@ -261,7 +274,9 @@ def compute_tile_change(start_url: str, end_url: str, height_scale_m: float):
     """Compute per-pixel change array (end - start volume)."""
     with rasterio.open(start_url) as src_start, rasterio.open(end_url) as src_end:
         if src_start.crs != src_end.crs or src_start.transform != src_end.transform:
-            raise ValueError("Start and end rasters must share CRS and transform")
+            raise ValueError(
+                "Start and end rasters must share CRS and transform"
+            )
 
         start_density = src_start.read(1, masked=True)
         start_height_norm = src_start.read(2, masked=True)
@@ -311,7 +326,9 @@ def collect_change_values_for_threshold(
     collected = []
     shared = sorted(set(tiles_start.keys()) & set(tiles_end.keys()))
     mode_str = "decline" if is_decline else "change"
-    logger.info(f"Sampling {mode_str} values across {len(shared)} overlapping tiles")
+    logger.info(
+        f"Sampling {mode_str} values across {len(shared)} overlapping tiles"
+    )
 
     for tile_id in shared:
         start_url = tiles_start[tile_id]
@@ -341,7 +358,7 @@ def collect_change_values_for_threshold(
         # For change we want top p quantile of positive values
         threshold = float(np.quantile(all_concat, p))
         logger.info(
-            f"Change threshold (p={p*100:.1f}%): {threshold:.4f} (samples={all_concat.size})"
+            f"Change threshold (p={p*100:.1f}%): {threshold:.4f}; samples={all_concat.size}"
         )
     return threshold, is_decline
 
