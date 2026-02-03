@@ -72,14 +72,13 @@ Open them in Jupyter / VS Code after creating the environment to explore typical
 ## Change detection
 
 By comparing two temporal prediction rasters, we can begin to understand change
-over time and identify areas of the highest growth and decline. We've included
-a script that enables users to compare building change between two timestamps.
-This script takes temporal prediction rasters as input, and returns vector
-polygons showing the most significant growth or decline "hotspots". This script
-is available at: `scripts/analysis/compute-change-clusters.py`.
+over time and identify areas of high growth and decline. We've included a script
+to compare building change between two timestamps. This script takes prediction
+rasters as input, and returns vector polygons showing areas of significant
+change, or "hotspots". See: `scripts/analysis/compute-change-clusters.py`.
 
-For each pixel, the script computes a proxy for built volume at each timestamp
-using predicted density and normalized height:
+For each pixel and timetsamp, we compute a proxy for built volume using density
+and normalized height:
 
 ```
 V_t = D_t * (H_t_norm * s)
@@ -97,10 +96,8 @@ Volumetric change between two timestamps is then:
 ΔV = V_end − V_start
 ```
 
-After computing per-pixel change, the script keeps only those pixels with the 
-largest increases (positive) or decreases (negative) based on a chosen
-percentile threshold (`change-percentile`). Neighboring high-change pixels are
-grouped into contiguous clusters and saved as polygons.
+After computing per-pixel change, we keep only those pixels with the largest
+increases (positive) or decreases (negative) based on a chosen threshold (`change-percentile`). Neighboring high-change pixels are grouped into contiguous clusters and saved as polygons.
 
 Example usage:
 
