@@ -77,8 +77,8 @@ class Config(BaseModel):
     predictions_root: Optional[str] = None
     data_dir: Optional[str] = None
     sas_token: Optional[str] = None  # provide via --sas-token or SAS_TOKEN env
-    start_ts: str = "2020q2"
-    end_ts: str = "2025q2"
+    start_ts: Optional[str] = "2020q2"
+    end_ts: Optional[str] = "2025q2"
     bbox: Optional[Tuple[float, float, float, float]] = (
         None  # (minx, miny, maxx, maxy) WGS84
     )
