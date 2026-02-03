@@ -112,7 +112,7 @@ python scripts/analysis/compute-change-clusters.py
 ```
 <p align="center">
     <img src="images/bamako_growth.png" alt="Bamako growth" width="800"/><br/>
-    <b>Figure 1.</b> High growth hotspots in Bamako, 2020-2025..
+    <b>Figure 1.</b> High growth hotspots in Bamako, 2020-2025.
 </p>
 
 ## Datasets
