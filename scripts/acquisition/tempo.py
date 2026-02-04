@@ -38,7 +38,6 @@ from typing import List, Optional, Sequence, Tuple
 import requests
 from tqdm import tqdm
 
-
 # ----------------------------
 # Configuration (edit if needed)
 # ----------------------------
@@ -59,17 +58,16 @@ QUARTERS: List[str] = [
     if not (year == 2025 and q > 2)
 ][1:]
 
-BASE_URL = "https://opendata.aiforgood.ai/building-density/locations/{location}/{yq}_cog.tif"
+BASE_URL = (
+    "https://opendata.aiforgood.ai/building-density/locations/{location}/{yq}_cog.tif"
+)
 DEFAULT_DOWNLOAD_DIR = Path("data/tempo_tiles")
 
-
-# ----------------------------
-# Data structures
-# ----------------------------
 
 @dataclass(frozen=True)
 class DownloadTask:
     """A single (location, quarter) download target."""
+
     location: str
     quarter: str
 
@@ -77,6 +75,7 @@ class DownloadTask:
 @dataclass
 class DownloadReport:
     """Summary stats for a batch download."""
+
     total: int = 0
     downloaded: int = 0
     skipped_existing: int = 0
@@ -87,10 +86,6 @@ class DownloadReport:
         if self.failed_items is None:
             self.failed_items = []
 
-
-# ----------------------------
-# Core utilities
-# ----------------------------
 
 def build_url(location: str, quarter: str) -> str:
     """Construct the remote URL for a given location and quarter."""
@@ -201,7 +196,8 @@ def download_many(
     report = DownloadReport(total=len(tasks))
 
     def _worker(t: DownloadTask) -> Tuple[str, str, str]:
-        # Per-thread Session for better performance vs creating a new TCP connection per request.
+        # Per-thread Session for better performance vs creating a new TCP
+        # connection per request.
         with requests.Session() as s:
             return download_one(
                 t,
@@ -221,6 +217,7 @@ def download_many(
 
                 if status == "downloaded":
                     report.downloaded += 1
+                    tqdm.write(f"Saved: {output_path(output_dir, loc, q)}")
                 elif status == "skipped":
                     report.skipped_existing += 1
                 else:
@@ -311,13 +308,11 @@ def print_verification(stats: dict) -> None:
         print(f"  Quarters: {preview}{more}")
 
 
-# ----------------------------
-# CLI helpers
-# ----------------------------
-
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    p = argparse.ArgumentParser(description="Download TEMPO building density tiles (COGs).")
+    p = argparse.ArgumentParser(
+        description="Download TEMPO building density tiles (COGs)."
+    )
     p.add_argument(
         "--output-dir",
         type=Path,
@@ -344,14 +339,20 @@ def parse_args() -> argparse.Namespace:
 
     sub = p.add_subparsers(dest="command", required=True)
 
-    one = sub.add_parser("download-one", help="Download a single tile (shows byte progress).")
+    one = sub.add_parser(
+        "download-one", help="Download a single tile (shows byte progress)."
+    )
     one.add_argument("--location", required=True, choices=LOCATIONS)
     one.add_argument("--quarter", required=True, choices=QUARTERS)
 
-    qtr = sub.add_parser("download-quarter", help="Download all locations for one quarter.")
+    qtr = sub.add_parser(
+        "download-quarter", help="Download all locations for one quarter."
+    )
     qtr.add_argument("--quarter", required=True, choices=QUARTERS)
 
-    loc = sub.add_parser("download-location", help="Download all quarters for one location.")
+    loc = sub.add_parser(
+        "download-location", help="Download all quarters for one location."
+    )
     loc.add_argument("--location", required=True, choices=LOCATIONS)
 
     sub.add_parser("download-all", help="Download all locations and all quarters.")
@@ -388,6 +389,8 @@ def main() -> int:
                 show_progress=True,  # <-- ensures per-file progress bar
             )
         print(f"{loc}/{q}: {status}")
+        if status == "downloaded":
+            print(f"Saved to: {output_path(out_dir, loc, q)}")
         return 0 if status == "downloaded" or status == "skipped" else 2
 
     # Multi-file paths: show tile-level progress bar via download_many.
