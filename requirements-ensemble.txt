@@ -1,0 +1,17 @@
+# Core raster processing
+rasterio
+numpy
+scipy
+shapely
+
+# Logging and progress
+loguru
+tqdm
+
+# Azure + cloud access
+python-dotenv
+cloudpathlib[azure]
+
+# Planetary Computer STAC (water + elevation data)
+pystac-client
+planetary-computer
