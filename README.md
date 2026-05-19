@@ -34,7 +34,7 @@ This repository serves **two purposes**:
 1. **Data Exploration** (main README): Access and work with our public building density & height datasets through tutorial notebooks and programmatic access.
 2. **Model Training** ([TRAINING.md](TRAINING.md)): Reproduce the training pipeline from our paper to train your own model using Planet imagery.
 
-**Most users** will be interested in the data exploration tutorials below. If you want to train the model yourself, see [TRAINING.md](TRAINING.md).
+**Most users** will be interested in the data exploration tutorials and analysis scripts detailed below. If you want to train the model yourself, see [TRAINING.md](TRAINING.md).
 
 ---
 
@@ -68,6 +68,52 @@ Two example Jupyter notebooks are included in the `tutorials/` folder to help yo
 | [`working-with-temporal-raster-data.ipynb`](tutorials/working-with-temporal-raster-data.ipynb) | Shows how to identify patterns of urban growth. |
 
 Open them in Jupyter / VS Code after creating the environment to explore typical data access and visualization workflows.
+
+## Change detection
+
+By comparing two temporal prediction rasters, we can begin to understand change
+over time and identify areas of high growth and decline. We've included a script
+to compare building change between two timestamps. This script takes prediction
+rasters as input, and returns vector polygons showing areas of significant
+change, or "hotspots". See: `scripts/analysis/compute-change-clusters.py`.
+
+For each pixel and timetsamp, we compute a proxy for built volume using density
+and normalized height:
+
+```
+V_t = D_t * (H_t_norm * s)
+```
+
+where:
+- `D_t` = predicted density at time `t` (band 1)
+- `H_t_norm` = normalized height at time `t` (band 2)
+- `s` = height scale factor converting normalized height to meters
+  (`height_scale_m`)
+
+Volumetric change between two timestamps is then:
+
+```
+ΔV = V_end − V_start
+```
+
+After computing per-pixel change, we keep only those pixels with the largest
+increases (positive) or decreases (negative) based on a chosen threshold (`change-percentile`). Neighboring high-change pixels are grouped into contiguous clusters and saved as polygons.
+
+Example usage:
+
+```
+python scripts/analysis/compute-change-clusters.py
+    --start-cog https://opendata.aiforgood.ai/building-density/locations/bamako/2020q2_cog.tif
+    --end-cog https://opendata.aiforgood.ai/building-density/locations/bamako/2025q2_cog.tif
+    --change-percentile 0.95
+    --output-gpkg growth.gpkg
+    --output-layer clusters
+    --min-cluster-pixels 8
+```
+<p align="center">
+    <img src="images/bamako_growth.png" alt="Bamako growth" width="800"/><br/>
+    <b>Figure 1.</b> High growth hotspots in Bamako, 2020-2025.
+</p>
 
 ## Datasets
 
