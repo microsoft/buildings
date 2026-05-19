@@ -63,13 +63,17 @@ def load_quads_of_interest(
 ) -> gpd.GeoDataFrame:
     gdf_index = gpd.read_file(planet_index_path)
 
-    # Create 'quad' column from 'data' column (extract filename without extension)
-    if "data" in gdf_index.columns:
+    # Create 'quad' column from 'filename' (new schema) or 'data' (legacy schema).
+    if "filename" in gdf_index.columns:
+        gdf_index["quad"] = gdf_index["filename"].apply(
+            lambda x: Path(x).stem if isinstance(x, str) else None
+        )
+    elif "data" in gdf_index.columns:
         gdf_index["quad"] = gdf_index["data"].apply(
             lambda x: Path(x).stem if isinstance(x, str) else None
         )
     elif "quad" not in gdf_index.columns:
-        raise ValueError("Planet index must have either 'data' or 'quad' column.")
+        raise ValueError("Planet index must have 'filename', 'data', or 'quad' column.")
 
     # Ensure CRS is WGS84 for compatibility with Overture (GeoParquet is in EPSG:4326)
     if gdf_index.crs is not None and gdf_index.crs.to_epsg() != 4326:

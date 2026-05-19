@@ -358,13 +358,17 @@ def load_and_filter_data(available_planet_csv, google_index, planet_index):
     logger.info(f"Loading Planet index from {planet_index}")
     planet_gdf = gpd.read_file(planet_index)
 
-    # Create 'quad' column from 'data' column (extract filename without extension)
-    if "data" in planet_gdf.columns:
+    # Create 'quad' column from 'filename' (new schema) or 'data' (legacy schema).
+    if "filename" in planet_gdf.columns:
+        planet_gdf["quad"] = planet_gdf["filename"].apply(
+            lambda x: Path(x).stem if isinstance(x, str) else None
+        )
+    elif "data" in planet_gdf.columns:
         planet_gdf["quad"] = planet_gdf["data"].apply(
             lambda x: Path(x).stem if isinstance(x, str) else None
         )
     elif "quad" not in planet_gdf.columns:
-        raise ValueError("Planet index must have either 'data' or 'quad' column.")
+        raise ValueError("Planet index must have 'filename', 'data', or 'quad' column.")
 
     # Ensure geometry is properly loaded
     if planet_gdf.crs is None:
