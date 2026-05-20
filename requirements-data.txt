@@ -8,5 +8,6 @@ folium
 imageio
 rasterio
 Pillow
+tqdm
 ipython
 notebook
