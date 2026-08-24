@@ -172,6 +172,68 @@ Where `{location}` is one of: `bamako`, `guangdong_province`, `guatemala_departm
 
 ---
 
+## Clipping to an area of interest
+
+The global layer is distributed as thousands of Planet L15 quads, so working with a
+country or region usually means finding the right quads, mosaicking them, and clipping
+the result. We've included a script that does this in one step and writes a single
+two-band COG. See: `scripts/analysis/clip-to-boundary.py`.
+
+Only the tiles overlapping your area of interest are read, and they're streamed directly
+over HTTP with GDAL's `/vsicurl/` driver, so nothing but the tile index is downloaded.
+The output keeps the source CRS, resolution and pixel grid and is resampled with nearest
+neighbour onto a grid-aligned extent, so its pixels are an exact copy of the source plus
+boundary masking.
+
+The area of interest can either be your own vector file (any OGR-readable format,
+reprojected as needed) or a country ISO3 code, in which case the ADM0 boundary is
+downloaded from [fieldmaps.io](https://fieldmaps.io/data/geoboundaries) automatically.
+
+Example usage:
+
+```
+# Clip a country by ISO3 code
+python scripts/analysis/clip-to-boundary.py
+    --iso3 LSO
+    --quarter 2023q4
+    --output lesotho_2023q4.tif
+
+# Clip to your own vector file
+python scripts/analysis/clip-to-boundary.py
+    --boundary aoi.gpkg
+    --layer districts
+    --quarter 2020q4
+    --output aoi_2020q4.tif
+```
+
+Pass `--list-quarters` to see which quarters the tile index currently exposes. The
+quarters are read from the index itself, so newly published layers are picked up without
+updating the script.
+
+Statistics computed near the edge of an area of interest (focal windows, zonal summaries)
+will otherwise be evaluated against NoData. Use `--buffer-m` to keep a margin of real data
+around the boundary:
+
+```
+python scripts/analysis/clip-to-boundary.py
+    --iso3 RWA
+    --quarter 2023q4
+    --buffer-m 1000
+    --output rwanda_2023q4.tif
+```
+
+> **Note:** the buffer is specified as a ground distance in meters. EPSG:3857 is not
+> conformal with respect to the WGS84 ellipsoid, so the script scales the distance by the
+> local meridian scale factor and verifies the result geodesically rather than buffering
+> in projected units directly.
+
+Because this script reads the global tile index, it covers the quarters published in that
+index (currently 2020 Q4 and 2023 Q4) at roughly 76 m/px. For the five locations with a
+quarterly time series, the per-quarter COGs linked above are already clipped and can be
+used directly.
+
+---
+
 ## Model Training
 
 Want to train the model yourself? See **[TRAINING.md](TRAINING.md)** for:
