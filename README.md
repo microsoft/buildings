@@ -211,21 +211,16 @@ quarters are read from the index itself, so newly published layers are picked up
 updating the script.
 
 Statistics computed near the edge of an area of interest (focal windows, zonal summaries)
-will otherwise be evaluated against NoData. Use `--buffer-m` to keep a margin of real data
-around the boundary:
+will otherwise be evaluated against NoData. Use `--buffer` to keep a margin of real data
+around the boundary, given in EPSG:3857 units:
 
 ```
 python scripts/analysis/clip-to-boundary.py
     --iso3 RWA
     --quarter 2023q4
-    --buffer-m 1000
+    --buffer 1000
     --output rwanda_2023q4.tif
 ```
-
-> **Note:** the buffer is specified as a ground distance in meters. EPSG:3857 is not
-> conformal with respect to the WGS84 ellipsoid, so the script scales the distance by the
-> local meridian scale factor and verifies the result geodesically rather than buffering
-> in projected units directly.
 
 Because this script reads the global tile index, it covers the quarters published in that
 index (currently 2020 Q4 and 2023 Q4) at roughly 76 m/px. For the five locations with a

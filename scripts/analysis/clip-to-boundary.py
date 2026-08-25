@@ -33,12 +33,11 @@ Example usage:
         --quarter 2020q4
         --output aoi_2020q4.tif
 
-3.  Add a 1 km margin around the boundary so that focal or zonal statistics near
-    the edge are not computed against NoData:
+3.  Keep a margin of data around the boundary, in projected units:
     python clip-to-boundary.py
         --iso3 RWA
         --quarter 2023q4
-        --buffer-m 1000
+        --buffer 1000
         --output rwanda_2023q4.tif
 
 4.  Reuse an already downloaded copy of the tile index:
@@ -62,34 +61,31 @@ import urllib.request
 import zipfile
 
 import geopandas as gpd
-import numpy as np
 import pyogrio
+import rasterio
+import rasterio.shutil
 from loguru import logger
-from osgeo import gdal
-from pyproj import CRS, Geod
-from shapely.geometry import LineString
-
-gdal.UseExceptions()
 
 TILE_INDEX_URL = "https://opendata.aiforgood.ai/building-density/tile_index.gpkg"
 DEFAULT_INDEX_PATH = os.path.join("data", "tile_index.gpkg")
-
-# fieldmaps.io redistributes geoBoundaries as ready-to-use GeoPackages. The
-# "originals" archives hold the true national borders; the "extended" archives are
-# edge-matched and deliberately extend past them, so they are not used here.
 GEOBOUNDARIES_URL = "https://data.fieldmaps.io/geoboundaries/originals/{code}.gpkg.zip"
 
 WORKING_CRS = 3857
 NODATA = -1
-BAND_NAMES = ["building_density", "building_height"]
+BAND_NAMES = ("building_density", "building_height")
 QUARTER_COLUMN_PREFIX = "data_"
+
+# Streaming many small COGs is much faster when GDAL does not probe for sibling files.
+GDAL_HTTP_OPTIONS = {
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "1",
+}
 
 
 def download(url: str, timeout: int = 900) -> bytes:
-    """Fetch a URL, sending an explicit User-Agent.
-
-    Some data hosts reject Python's default urllib User-Agent with HTTP 403.
-    """
+    """Fetch a URL. Some hosts reject the default urllib User-Agent."""
     request = urllib.request.Request(url, headers={"User-Agent": "curl/8.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
@@ -101,12 +97,10 @@ def ensure_tile_index(path: str) -> str:
         logger.info(f"Using tile index at {path}")
         return path
 
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     logger.info(f"Downloading tile index from {TILE_INDEX_URL} (this is a large file)")
-    payload = download(TILE_INDEX_URL)
     with open(path, "wb") as f:
-        f.write(payload)
+        f.write(download(TILE_INDEX_URL))
     logger.info(f"Saved tile index to {path}")
     return path
 
@@ -120,18 +114,17 @@ def index_layer(path: str) -> str:
 
 
 def available_quarters(path: str, layer: str) -> list:
-    """List the quarters the tile index exposes, newest last.
+    """List the quarters the tile index exposes.
 
-    Quarters are discovered from the index schema rather than hard coded, so new
-    releases are picked up without changing this script.
+    These are read from the index schema rather than hard coded, so new releases
+    are picked up without changing this script.
     """
     fields = pyogrio.read_info(path, layer=layer)["fields"]
-    quarters = [
+    return sorted(
         field[len(QUARTER_COLUMN_PREFIX):]
         for field in fields
         if field.startswith(QUARTER_COLUMN_PREFIX)
-    ]
-    return sorted(quarters)
+    )
 
 
 def load_geoboundaries_adm0(iso3: str) -> gpd.GeoDataFrame:
@@ -152,79 +145,24 @@ def load_geoboundaries_adm0(iso3: str) -> gpd.GeoDataFrame:
     return boundary
 
 
-def mercator_meridian_scale(latitude_deg: float) -> float:
-    """Largest ratio of EPSG:3857 units to ground meters at a given latitude.
-
-    EPSG:3857 is not conformal with respect to the WGS84 ellipsoid, so one
-    projected unit corresponds to a different ground distance north-south than
-    east-west::
-
-        parallel scale  k_p(phi) = sec(phi) * sqrt(1 - e^2 sin^2 phi)
-        meridian scale  k_m(phi) = sec(phi) * (1 - e^2 sin^2 phi)^1.5 / (1 - e^2)
-
-    The meridian scale is the larger of the two, so scaling a buffer by it
-    guarantees at least the requested ground distance in every direction.
-    """
-    ellipsoid = CRS.from_epsg(4326).ellipsoid
-    flattening = 1.0 / ellipsoid.inverse_flattening
-    e2 = 2.0 * flattening - flattening**2
-    phi = math.radians(latitude_deg)
-    w = 1.0 - e2 * math.sin(phi) ** 2
-    return w**1.5 / ((1.0 - e2) * math.cos(phi))
-
-
-def measure_margin(original: gpd.GeoDataFrame, buffered: gpd.GeoDataFrame, samples: int = 500):
-    """Geodesic distances from the original boundary out to the buffered boundary."""
-    geod = Geod(ellps="WGS84")
-    border = original.to_crs(4326).geometry.union_all().boundary
-    outline = buffered.to_crs(4326).geometry.union_all().boundary
-
-    rings = [border] if isinstance(border, LineString) else list(border.geoms)
-    longest = max(rings, key=lambda ring: ring.length)
-
-    distances = []
-    for fraction in np.linspace(0, 1, samples, endpoint=False):
-        point = longest.interpolate(fraction, normalized=True)
-        nearest = outline.interpolate(outline.project(point))
-        distances.append(geod.inv(point.x, point.y, nearest.x, nearest.y)[2])
-    return np.array(distances)
-
-
-def buffer_boundary(boundary: gpd.GeoDataFrame, buffer_m: float) -> gpd.GeoDataFrame:
-    """Grow a boundary by a ground distance, working in EPSG:3857."""
+def prepare_boundary(boundary: gpd.GeoDataFrame, buffer: float) -> gpd.GeoDataFrame:
+    """Reproject the boundary to the working CRS and optionally buffer it."""
     projected = boundary.to_crs(WORKING_CRS)
     projected["geometry"] = projected.geometry.make_valid()
-    if buffer_m <= 0:
-        return projected
 
-    bounds = boundary.to_crs(4326).total_bounds
-    latitude = max(abs(bounds[1]), abs(bounds[3]))
-    scale = mercator_meridian_scale(latitude)
-    logger.info(
-        f"Buffering by {buffer_m:,.0f} m ({buffer_m * scale:,.1f} projected units, "
-        f"scale {scale:.5f} at {latitude:.2f} degrees)"
-    )
+    if buffer > 0:
+        logger.info(f"Buffering the boundary by {buffer:,.1f} projected units")
+        projected["geometry"] = projected.geometry.buffer(buffer).make_valid()
 
-    projected["geometry"] = projected.geometry.buffer(
-        buffer_m * scale, join_style="round", resolution=32
-    )
-    projected["geometry"] = projected.geometry.make_valid()
-
-    margins = measure_margin(boundary, projected)
-    logger.info(
-        f"Margin around boundary: min {margins.min():,.1f} m, "
-        f"median {np.median(margins):,.1f} m"
-    )
     return projected
 
 
 def select_tiles(index_path: str, layer: str, boundary: gpd.GeoDataFrame, quarter: str) -> list:
     """Return the tile URLs for the quads intersecting the boundary."""
     column = f"{QUARTER_COLUMN_PREFIX}{quarter}"
-    bounds = tuple(boundary.to_crs(WORKING_CRS).total_bounds)
 
     logger.info("Querying the tile index")
-    tiles = pyogrio.read_dataframe(index_path, layer=layer, bbox=bounds)
+    tiles = pyogrio.read_dataframe(index_path, layer=layer, bbox=tuple(boundary.total_bounds))
     if column not in tiles.columns:
         raise SystemExit(f"Tile index has no column {column!r}")
 
@@ -238,15 +176,15 @@ def select_tiles(index_path: str, layer: str, boundary: gpd.GeoDataFrame, quarte
     return urls
 
 
-def snap_extent(dataset: gdal.Dataset, boundary: gpd.GeoDataFrame):
+def snap_extent(dataset, boundary: gpd.GeoDataFrame):
     """Boundary extent clipped to the mosaic and snapped onto its pixel grid."""
-    origin_x, resolution, _, origin_y, _, negative_res = dataset.GetGeoTransform()
-    mosaic_max_x = origin_x + resolution * dataset.RasterXSize
-    mosaic_min_y = origin_y + negative_res * dataset.RasterYSize
+    resolution = dataset.transform.a
+    origin_x, origin_y = dataset.transform.c, dataset.transform.f
+    mosaic = dataset.bounds
 
-    min_x, min_y, max_x, max_y = boundary.to_crs(WORKING_CRS).total_bounds
-    min_x, max_x = max(min_x, origin_x), min(max_x, mosaic_max_x)
-    min_y, max_y = max(min_y, mosaic_min_y), min(max_y, origin_y)
+    min_x, min_y, max_x, max_y = boundary.total_bounds
+    min_x, max_x = max(min_x, mosaic.left), min(max_x, mosaic.right)
+    min_y, max_y = max(min_y, mosaic.bottom), min(max_y, mosaic.top)
 
     min_x = origin_x + math.floor((min_x - origin_x) / resolution) * resolution
     max_x = origin_x + math.ceil((max_x - origin_x) / resolution) * resolution
@@ -261,7 +199,7 @@ def run(command: list) -> None:
 
 
 def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
-         buffer_m: float, boundary_source: str) -> None:
+         buffer: float, boundary_source: str) -> None:
     """Mosaic the tiles, clip them to the boundary and write a COG."""
     with tempfile.TemporaryDirectory() as tmp:
         listing = os.path.join(tmp, "tiles.txt")
@@ -269,9 +207,7 @@ def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
             f.write("\n".join(f"/vsicurl/{url}" for url in urls) + "\n")
 
         cutline = os.path.join(tmp, "cutline.gpkg")
-        boundary.to_crs(WORKING_CRS)[["geometry"]].to_file(
-            cutline, layer="cutline", driver="GPKG"
-        )
+        boundary[["geometry"]].to_file(cutline, layer="cutline", driver="GPKG")
 
         mosaic = os.path.join(tmp, "mosaic.vrt")
         logger.info("Building a virtual mosaic of the tiles")
@@ -280,27 +216,10 @@ def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
             "-srcnodata", str(NODATA), "-vrtnodata", str(NODATA), mosaic,
         ])
 
-        dataset = gdal.Open(mosaic, gdal.GA_Update)
-        if dataset.RasterCount != len(BAND_NAMES):
-            raise SystemExit(
-                f"Expected {len(BAND_NAMES)} bands, found {dataset.RasterCount}"
-            )
-        dataset.SetMetadata({
-            "quarter": quarter,
-            "band_1": "building density: fraction of pixel covered by buildings (0-1)",
-            "band_2": "building height: normalised (0-1), multiply by 100 for meters",
-            "nodata_value": str(NODATA),
-            "boundary_buffer_m": str(buffer_m),
-            "boundary_source": boundary_source,
-            "source_tiles": str(len(urls)),
-            "source": "Microsoft Building Density & Height Dataset",
-        })
-        for position, name in enumerate(BAND_NAMES, start=1):
-            dataset.GetRasterBand(position).SetDescription(name)
-        dataset.FlushCache()
-
-        (min_x, min_y, max_x, max_y), resolution = snap_extent(dataset, boundary)
-        del dataset
+        with rasterio.open(mosaic) as dataset:
+            if dataset.count != len(BAND_NAMES):
+                raise SystemExit(f"Expected {len(BAND_NAMES)} bands, found {dataset.count}")
+            (min_x, min_y, max_x, max_y), resolution = snap_extent(dataset, boundary)
 
         width = int(round((max_x - min_x) / resolution))
         height = int(round((max_y - min_y) / resolution))
@@ -318,19 +237,35 @@ def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
             mosaic, clipped,
         ])
 
-        logger.info(f"Writing {output}")
-        parent = os.path.dirname(os.path.abspath(output))
-        os.makedirs(parent, exist_ok=True)
-        run([
-            "gdal_translate", "-q", "-of", "COG",
-            "-co", "COMPRESS=DEFLATE", "-co", "PREDICTOR=3",
-            "-co", "BIGTIFF=IF_SAFER", "-co", "NUM_THREADS=ALL_CPUS",
-            "-co", "RESAMPLING=AVERAGE",
-            clipped, output,
-        ])
+        # The COG driver is copy-only, so band names and metadata are set on the
+        # clipped VRT first; reopening the finished COG would break its layout.
+        with rasterio.open(clipped, "r+") as dataset:
+            dataset.descriptions = BAND_NAMES
+            dataset.update_tags(
+                quarter=quarter,
+                band_1="building density: fraction of pixel covered by buildings (0-1)",
+                band_2="building height: normalised (0-1), multiply by 100 for meters",
+                nodata_value=str(NODATA),
+                boundary_buffer=str(buffer),
+                boundary_source=boundary_source,
+                source_tiles=str(len(urls)),
+                source="Microsoft Building Density & Height Dataset",
+            )
 
-    size_mb = os.path.getsize(output) / 1e6
-    logger.info(f"Wrote {output} ({size_mb:,.1f} MB)")
+        logger.info(f"Writing {output}")
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        rasterio.shutil.copy(
+            clipped,
+            output,
+            driver="COG",
+            COMPRESS="DEFLATE",
+            PREDICTOR=3,
+            BIGTIFF="IF_SAFER",
+            NUM_THREADS="ALL_CPUS",
+            RESAMPLING="AVERAGE",
+        )
+
+    logger.info(f"Wrote {output} ({os.path.getsize(output) / 1e6:,.1f} MB)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -361,10 +296,10 @@ def parse_args() -> argparse.Namespace:
         help="Local path of the tile index; it is downloaded here if missing",
     )
     parser.add_argument(
-        "--buffer-m",
+        "--buffer",
         type=float,
         default=0.0,
-        help="Optional margin in meters to keep around the boundary",
+        help="Margin to keep around the boundary, in EPSG:3857 units",
     )
     parser.add_argument(
         "--list-quarters",
@@ -376,20 +311,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-
-    # Streaming many small COGs over HTTP is much faster when GDAL does not probe
-    # sibling files and caches the ranges it reads.
-    gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-    gdal.SetConfigOption("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
-    gdal.SetConfigOption("GDAL_HTTP_MAX_RETRY", "3")
-    gdal.SetConfigOption("GDAL_HTTP_RETRY_DELAY", "1")
-    for key in (
-        "GDAL_DISABLE_READDIR_ON_OPEN",
-        "CPL_VSIL_CURL_ALLOWED_EXTENSIONS",
-        "GDAL_HTTP_MAX_RETRY",
-        "GDAL_HTTP_RETRY_DELAY",
-    ):
-        os.environ.setdefault(key, gdal.GetConfigOption(key))
+    os.environ.update(GDAL_HTTP_OPTIONS)
 
     index_path = ensure_tile_index(args.index)
     layer = index_layer(index_path)
@@ -414,6 +336,8 @@ def main() -> None:
         )
     if args.layer and not args.boundary:
         raise SystemExit("--layer only applies to --boundary")
+    if args.buffer < 0:
+        raise SystemExit("--buffer must not be negative")
 
     if args.iso3:
         boundary = load_geoboundaries_adm0(args.iso3)
@@ -428,9 +352,9 @@ def main() -> None:
     if boundary.crs is None:
         raise SystemExit("The area of interest has no CRS; please set one")
 
-    boundary = buffer_boundary(boundary, args.buffer_m)
+    boundary = prepare_boundary(boundary, args.buffer)
     urls = select_tiles(index_path, layer, boundary, args.quarter)
-    clip(urls, boundary, args.quarter, args.output, args.buffer_m, boundary_source)
+    clip(urls, boundary, args.quarter, args.output, args.buffer, boundary_source)
 
 
 if __name__ == "__main__":
