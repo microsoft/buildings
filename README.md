@@ -193,16 +193,16 @@ Example usage:
 
 ```
 # Clip a country by ISO3 code
-python scripts/analysis/clip-to-boundary.py
-    --iso3 LSO
-    --quarter 2023q4
+python scripts/analysis/clip-to-boundary.py \
+    --iso3 LSO \
+    --quarter 2023q4 \
     --output lesotho_2023q4.tif
 
 # Clip to your own vector file
-python scripts/analysis/clip-to-boundary.py
-    --boundary aoi.gpkg
-    --layer districts
-    --quarter 2020q4
+python scripts/analysis/clip-to-boundary.py \
+    --boundary aoi.gpkg \
+    --layer districts \
+    --quarter 2020q4 \
     --output aoi_2020q4.tif
 ```
 
@@ -215,10 +215,10 @@ will otherwise be evaluated against NoData. Use `--buffer` to keep a margin of r
 around the boundary, given in EPSG:3857 units:
 
 ```
-python scripts/analysis/clip-to-boundary.py
-    --iso3 RWA
-    --quarter 2023q4
-    --buffer 1000
+python scripts/analysis/clip-to-boundary.py \
+    --iso3 RWA \
+    --quarter 2023q4 \
+    --buffer 1000 \
     --output rwanda_2023q4.tif
 ```
 

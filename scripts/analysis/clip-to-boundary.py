@@ -54,6 +54,7 @@ import argparse
 import io
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,11 +70,16 @@ from loguru import logger
 TILE_INDEX_URL = "https://opendata.aiforgood.ai/building-density/tile_index.gpkg"
 DEFAULT_INDEX_PATH = os.path.join("data", "tile_index.gpkg")
 GEOBOUNDARIES_URL = "https://data.fieldmaps.io/geoboundaries/originals/{code}.gpkg.zip"
+USER_AGENT = "curl/8.0"
 
 WORKING_CRS = 3857
 NODATA = -1
 BAND_NAMES = ("building_density", "building_height")
 QUARTER_COLUMN_PREFIX = "data_"
+
+# Snapping compares coordinates that are many millions of meters from the origin, so
+# allow a little floating point slack before rounding a grid position outwards.
+GRID_TOLERANCE = 1e-6
 
 # Streaming many small COGs is much faster when GDAL does not probe for sibling files.
 GDAL_HTTP_OPTIONS = {
@@ -86,21 +92,37 @@ GDAL_HTTP_OPTIONS = {
 
 def download(url: str, timeout: int = 900) -> bytes:
     """Fetch a URL. Some hosts reject the default urllib User-Agent."""
-    request = urllib.request.Request(url, headers={"User-Agent": "curl/8.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
-def ensure_tile_index(path: str) -> str:
-    """Return a local path to the tile index, downloading it if necessary."""
+def ensure_tile_index(path: str, timeout: int = 900) -> str:
+    """Return a local path to the tile index, downloading it if necessary.
+
+    The index is streamed to a temporary file and moved into place once it is
+    complete, so an interrupted download cannot leave a truncated file behind that
+    later runs would mistake for a usable index.
+    """
     if os.path.exists(path):
         logger.info(f"Using tile index at {path}")
         return path
 
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
     logger.info(f"Downloading tile index from {TILE_INDEX_URL} (this is a large file)")
-    with open(path, "wb") as f:
-        f.write(download(TILE_INDEX_URL))
+
+    request = urllib.request.Request(TILE_INDEX_URL, headers={"User-Agent": USER_AGENT})
+    handle, partial = tempfile.mkstemp(dir=directory, suffix=".partial")
+    try:
+        with os.fdopen(handle, "wb") as f:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                shutil.copyfileobj(response, f)
+    except BaseException:
+        os.unlink(partial)
+        raise
+
+    os.replace(partial, path)
     logger.info(f"Saved tile index to {path}")
     return path
 
@@ -147,6 +169,14 @@ def load_geoboundaries_adm0(iso3: str) -> gpd.GeoDataFrame:
 
 def prepare_boundary(boundary: gpd.GeoDataFrame, buffer: float) -> gpd.GeoDataFrame:
     """Reproject the boundary to the working CRS and optionally buffer it."""
+    min_x, _, max_x, _ = boundary.to_crs(4326).total_bounds
+    if max_x - min_x > 180:
+        raise SystemExit(
+            "The area of interest spans more than 180 degrees of longitude, which usually "
+            "means it crosses the antimeridian. EPSG:3857 cannot represent that as one "
+            "contiguous extent; clip each side of the antimeridian separately."
+        )
+
     projected = boundary.to_crs(WORKING_CRS)
     projected["geometry"] = projected.geometry.make_valid()
 
@@ -154,6 +184,9 @@ def prepare_boundary(boundary: gpd.GeoDataFrame, buffer: float) -> gpd.GeoDataFr
         logger.info(f"Buffering the boundary by {buffer:,.1f} projected units")
         projected["geometry"] = projected.geometry.buffer(buffer).make_valid()
 
+    projected = projected[~projected.geometry.is_empty]
+    if projected.empty:
+        raise SystemExit("The area of interest has no geometry after preparation")
     return projected
 
 
@@ -170,10 +203,41 @@ def select_tiles(index_path: str, layer: str, boundary: gpd.GeoDataFrame, quarte
     tiles = tiles[tiles.geometry.intersects(geometry)]
     urls = [url for url in tiles[column].tolist() if url]
 
+    missing = len(tiles) - len(urls)
+    if missing:
+        logger.warning(
+            f"{missing} of {len(tiles)} quads have no {quarter} tile and will be left as NoData"
+        )
+
     logger.info(f"{len(urls)} tiles intersect the area of interest")
     if not urls:
         raise SystemExit("No tiles overlap the area of interest")
     return urls
+
+
+def snap_steps(distance: float, resolution: float, mode: str) -> int:
+    """Convert a distance to whole pixels, rounding outwards past float noise."""
+    steps = distance / resolution
+    nearest = round(steps)
+    if math.isclose(steps, nearest, rel_tol=0.0, abs_tol=GRID_TOLERANCE):
+        return nearest
+    return math.floor(steps) if mode == "floor" else math.ceil(steps)
+
+
+def validate_mosaic(dataset) -> None:
+    """Check the mosaic matches the grid assumptions the output relies on."""
+    if dataset.count != len(BAND_NAMES):
+        raise SystemExit(f"Expected {len(BAND_NAMES)} bands, found {dataset.count}")
+    if dataset.crs is None or dataset.crs.to_epsg() != WORKING_CRS:
+        raise SystemExit(f"Expected EPSG:{WORKING_CRS} tiles, found {dataset.crs}")
+
+    transform = dataset.transform
+    if transform.b or transform.d:
+        raise SystemExit("Rotated tiles are not supported")
+    if transform.a <= 0 or transform.e >= 0:
+        raise SystemExit("Expected north-up tiles")
+    if not math.isclose(transform.a, -transform.e, rel_tol=1e-9):
+        raise SystemExit("Expected square pixels")
 
 
 def snap_extent(dataset, boundary: gpd.GeoDataFrame):
@@ -182,14 +246,26 @@ def snap_extent(dataset, boundary: gpd.GeoDataFrame):
     origin_x, origin_y = dataset.transform.c, dataset.transform.f
     mosaic = dataset.bounds
 
-    min_x, min_y, max_x, max_y = boundary.total_bounds
-    min_x, max_x = max(min_x, mosaic.left), min(max_x, mosaic.right)
-    min_y, max_y = max(min_y, mosaic.bottom), min(max_y, mosaic.top)
+    requested = boundary.total_bounds
+    min_x, max_x = max(requested[0], mosaic.left), min(requested[2], mosaic.right)
+    min_y, max_y = max(requested[1], mosaic.bottom), min(requested[3], mosaic.top)
+    if min_x >= max_x or min_y >= max_y:
+        raise SystemExit("The area of interest does not overlap the available tiles")
 
-    min_x = origin_x + math.floor((min_x - origin_x) / resolution) * resolution
-    max_x = origin_x + math.ceil((max_x - origin_x) / resolution) * resolution
-    max_y = origin_y - math.floor((origin_y - max_y) / resolution) * resolution
-    min_y = origin_y - math.ceil((origin_y - min_y) / resolution) * resolution
+    if any(
+        abs(a - b) > GRID_TOLERANCE
+        for a, b in ((min_x, requested[0]), (min_y, requested[1]),
+                     (max_x, requested[2]), (max_y, requested[3]))
+    ):
+        logger.warning(
+            "The area of interest extends beyond the available tiles; "
+            "the output covers the overlapping part only"
+        )
+
+    min_x = origin_x + snap_steps(min_x - origin_x, resolution, "floor") * resolution
+    max_x = origin_x + snap_steps(max_x - origin_x, resolution, "ceil") * resolution
+    max_y = origin_y - snap_steps(origin_y - max_y, resolution, "floor") * resolution
+    min_y = origin_y - snap_steps(origin_y - min_y, resolution, "ceil") * resolution
     return (min_x, min_y, max_x, max_y), resolution
 
 
@@ -211,14 +287,15 @@ def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
 
         mosaic = os.path.join(tmp, "mosaic.vrt")
         logger.info("Building a virtual mosaic of the tiles")
+        # -strict so an unreachable tile fails the run instead of silently
+        # leaving a NoData hole in the output.
         run([
-            "gdalbuildvrt", "-q", "-input_file_list", listing,
+            "gdalbuildvrt", "-q", "-strict", "-input_file_list", listing,
             "-srcnodata", str(NODATA), "-vrtnodata", str(NODATA), mosaic,
         ])
 
         with rasterio.open(mosaic) as dataset:
-            if dataset.count != len(BAND_NAMES):
-                raise SystemExit(f"Expected {len(BAND_NAMES)} bands, found {dataset.count}")
+            validate_mosaic(dataset)
             (min_x, min_y, max_x, max_y), resolution = snap_extent(dataset, boundary)
 
         width = int(round((max_x - min_x) / resolution))
@@ -254,16 +331,25 @@ def clip(urls: list, boundary: gpd.GeoDataFrame, quarter: str, output: str,
 
         logger.info(f"Writing {output}")
         os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-        rasterio.shutil.copy(
-            clipped,
-            output,
-            driver="COG",
-            COMPRESS="DEFLATE",
-            PREDICTOR=3,
-            BIGTIFF="IF_SAFER",
-            NUM_THREADS="ALL_CPUS",
-            RESAMPLING="AVERAGE",
-        )
+        # Write beside the destination and move it into place, so a failure part
+        # way through does not leave a half written raster behind.
+        partial = f"{output}.partial"
+        try:
+            rasterio.shutil.copy(
+                clipped,
+                partial,
+                driver="COG",
+                COMPRESS="DEFLATE",
+                PREDICTOR=3,
+                BIGTIFF="IF_SAFER",
+                NUM_THREADS="ALL_CPUS",
+                RESAMPLING="AVERAGE",
+            )
+        except BaseException:
+            if os.path.exists(partial):
+                os.unlink(partial)
+            raise
+        os.replace(partial, output)
 
     logger.info(f"Wrote {output} ({os.path.getsize(output) / 1e6:,.1f} MB)")
 
@@ -336,8 +422,8 @@ def main() -> None:
         )
     if args.layer and not args.boundary:
         raise SystemExit("--layer only applies to --boundary")
-    if args.buffer < 0:
-        raise SystemExit("--buffer must not be negative")
+    if not math.isfinite(args.buffer) or args.buffer < 0:
+        raise SystemExit("--buffer must be a finite, non-negative number")
 
     if args.iso3:
         boundary = load_geoboundaries_adm0(args.iso3)
